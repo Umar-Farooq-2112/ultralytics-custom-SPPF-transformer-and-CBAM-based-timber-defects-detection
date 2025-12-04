@@ -77,30 +77,59 @@ class ConvBNAct(nn.Module):
 
 
 class CBAM_ChannelOnly(nn.Module):
-    """Channel-only attention (lightweight CBAM variant)."""
+    """Enhanced CBAM with channel and spatial attention for better feature refinement."""
     
     def __init__(self, channels, reduction=8):
-        """Initialize channel attention module.
+        """Initialize enhanced CBAM module.
         
         Args:
             channels (int): Number of input channels
             reduction (int): Channel reduction ratio
         """
         super().__init__()
+        # Enhanced channel attention with dual pooling
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
         mid = max(1, channels // reduction)
-        self.fc = nn.Sequential(
+        
+        # Deeper channel attention network (no BatchNorm in 1x1 spatial dims)
+        self.channel_fc = nn.Sequential(
             nn.Conv2d(channels, mid, 1, bias=False),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(mid, mid, 1, bias=False),
             nn.SiLU(inplace=True),
             nn.Conv2d(mid, channels, 1, bias=False),
             nn.Sigmoid()
         )
+        
+        # Spatial attention for location-aware refinement
+        self.spatial_conv = nn.Sequential(
+            nn.Conv2d(2, 8, kernel_size=7, padding=3, bias=False),
+            nn.BatchNorm2d(8),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(8, 8, kernel_size=7, padding=3, bias=False),
+            nn.BatchNorm2d(8),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(8, 1, kernel_size=7, padding=3, bias=False),
+            nn.Sigmoid()
+        )
     
     def forward(self, x):
-        """Forward pass with channel attention."""
-        attn = self.avg_pool(x)
-        attn = self.fc(attn)
-        return x * attn
+        """Forward pass with channel and spatial attention."""
+        # Channel attention using both avg and max pooling
+        avg_attn = self.channel_fc(self.avg_pool(x))
+        max_attn = self.channel_fc(self.max_pool(x))
+        channel_attn = avg_attn + max_attn
+        x = x * channel_attn
+        
+        # Spatial attention
+        avg_spatial = torch.mean(x, dim=1, keepdim=True)
+        max_spatial, _ = torch.max(x, dim=1, keepdim=True)
+        spatial_input = torch.cat([avg_spatial, max_spatial], dim=1)
+        spatial_attn = self.spatial_conv(spatial_input)
+        x = x * spatial_attn
+        
+        return x
 
 
 class SimSPPF(nn.Module):
@@ -166,10 +195,10 @@ class P5Transformer(nn.Module):
 
 
 class MobileNetV3BackboneDW(nn.Module):
-    """MobileNetV3 Small backbone with depthwise convolutions."""
+    """Enhanced MobileNetV3 Small backbone with multi-scale feature enhancement."""
     
     def __init__(self, pretrained=True):
-        """Initialize MobileNetV3 backbone.
+        """Initialize enhanced MobileNetV3 backbone.
         
         Args:
             pretrained (bool): Use pretrained weights
@@ -186,15 +215,36 @@ class MobileNetV3BackboneDW(nn.Module):
         self.stage2 = feats[3:7]
         self.stage3 = feats[7:]
 
-        # Depthwise convolutions for channel processing
-        self.conv_p4_dw = DWConvCustom(40, 40, kernel_size=3, stride=1, padding=1)
-        self.conv_p5_dw = DWConvCustom(576, 160, kernel_size=3, stride=1, padding=1)
+        # Enhanced P3 processing - critical for small defects (deeper stack with residuals)
+        self.conv_p3_1 = DWConvCustom(24, 48, kernel_size=3, stride=1, padding=1)
+        self.conv_p3_2 = DWConvCustom(48, 64, kernel_size=3, stride=1, padding=1)
+        self.conv_p3_3 = DWConvCustom(64, 64, kernel_size=3, stride=1, padding=1)
+        self.conv_p3_4 = DWConvCustom(64, 64, kernel_size=3, stride=1, padding=1)
+        self.conv_p3_5 = DWConvCustom(64, 64, kernel_size=3, stride=1, padding=1)
+        self.cbam_p3 = CBAM_ChannelOnly(64, reduction=4)
+        
+        # Enhanced P4 processing - balanced features (more capacity with residuals)
+        self.conv_p4_1 = DWConvCustom(40, 80, kernel_size=3, stride=1, padding=1)
+        self.conv_p4_2 = DWConvCustom(80, 128, kernel_size=3, stride=1, padding=1)
+        self.conv_p4_3 = DWConvCustom(128, 128, kernel_size=3, stride=1, padding=1)
+        self.conv_p4_4 = DWConvCustom(128, 128, kernel_size=3, stride=1, padding=1)
+        self.conv_p4_5 = DWConvCustom(128, 128, kernel_size=3, stride=1, padding=1)
+        self.cbam_p4 = CBAM_ChannelOnly(128, reduction=4)
+        
+        # Enhanced P5 processing - context and large defects (deepest with residuals)
+        self.conv_p5_1 = DWConvCustom(576, 192, kernel_size=3, stride=1, padding=1)
+        self.conv_p5_2 = DWConvCustom(192, 256, kernel_size=3, stride=1, padding=1)
+        self.conv_p5_3 = DWConvCustom(256, 256, kernel_size=3, stride=1, padding=1)
+        self.conv_p5_4 = DWConvCustom(256, 256, kernel_size=3, stride=1, padding=1)
+        self.conv_p5_5 = DWConvCustom(256, 256, kernel_size=3, stride=1, padding=1)
+        self.conv_p5_6 = DWConvCustom(256, 256, kernel_size=3, stride=1, padding=1)
+        self.cbam_p5 = CBAM_ChannelOnly(256, reduction=4)
 
-        # Output channels for each stage
-        self.out_channels = [24, 40, 160]
+        # Output channels for each stage (significantly increased)
+        self.out_channels = [64, 128, 256]
 
     def forward(self, x):
-        """Forward pass through backbone.
+        """Forward pass through enhanced backbone.
         
         Args:
             x (torch.Tensor): Input tensor
@@ -202,19 +252,51 @@ class MobileNetV3BackboneDW(nn.Module):
         Returns:
             list: Multi-scale features [P3, P4, P5]
         """
-        p3 = self.stage1(x)
-        p4_in = self.stage2(p3)
-        p4 = self.conv_p4_dw(p4_in)
-        p5_in = self.stage3(p4)
-        p5 = self.conv_p5_dw(p5_in)
+        # Extract features from MobileNetV3 stages first
+        p3_base = self.stage1(x)      # 24 channels
+        p4_base = self.stage2(p3_base)  # 40 channels  
+        p5_base = self.stage3(p4_base)  # 576 channels
+        
+        # Then enhance each level independently with deeper processing and residuals
+        # P3 path - preserve fine details for small defects (5 conv layers + residual)
+        p3 = self.conv_p3_1(p3_base)
+        p3 = self.conv_p3_2(p3)
+        p3_res = p3  # Save for residual
+        p3 = self.conv_p3_3(p3)
+        p3 = self.conv_p3_4(p3)
+        p3 = p3 + p3_res  # Residual connection
+        p3 = self.conv_p3_5(p3)
+        p3 = self.cbam_p3(p3)
+        
+        # P4 path - balanced feature extraction (5 conv layers + residual)
+        p4 = self.conv_p4_1(p4_base)
+        p4 = self.conv_p4_2(p4)
+        p4_res = p4  # Save for residual
+        p4 = self.conv_p4_3(p4)
+        p4 = self.conv_p4_4(p4)
+        p4 = p4 + p4_res  # Residual connection
+        p4 = self.conv_p4_5(p4)
+        p4 = self.cbam_p4(p4)
+        
+        # P5 path - deep context for large defects (6 conv layers + residual)
+        p5 = self.conv_p5_1(p5_base)
+        p5 = self.conv_p5_2(p5)
+        p5_res = p5  # Save for residual
+        p5 = self.conv_p5_3(p5)
+        p5 = self.conv_p5_4(p5)
+        p5 = p5 + p5_res  # Residual connection
+        p5 = self.conv_p5_5(p5)
+        p5 = self.conv_p5_6(p5)
+        p5 = self.cbam_p5(p5)
+        
         return [p3, p4, p5]
 
 
 class UltraLiteNeckDW(nn.Module):
-    """Ultra-lightweight neck with attention and transformer."""
+    """Enhanced neck with multi-scale fusion, attention, and context aggregation."""
     
-    def __init__(self, in_channels=[24, 40, 160]):
-        """Initialize ultra-lite neck.
+    def __init__(self, in_channels=[64, 128, 256]):
+        """Initialize enhanced neck.
         
         Args:
             in_channels (list): Input channels for [P3, P4, P5]
@@ -222,54 +304,105 @@ class UltraLiteNeckDW(nn.Module):
         super().__init__()
         c3, c4, c5 = in_channels
 
-        # Channel attention for each level
-        self.cbam3 = CBAM_ChannelOnly(c3, reduction=8)
-        self.cbam4 = CBAM_ChannelOnly(c4, reduction=8)
-
-        # SPPF on P5
-        self.sppf = SimSPPF(c5, c5)
-
-        # Transformer on P5
-        self.trans_p5 = P5Transformer(in_channels=c5, embed_dim=48, ff_dim=96, num_layers=2)
-        self.cbam5 = CBAM_ChannelOnly(48, reduction=8)
-
-        # Channel unification for outputs
-        self.out3 = DWConvCustom(c3, 32, kernel_size=3, padding=1)
-        self.out4 = DWConvCustom(c4, 48, kernel_size=3, padding=1)
-        self.out5 = DWConvCustom(48, 64, kernel_size=3, padding=1)
-
-        # Fusion layers
-        self.fuse_p4 = ConvBNAct(48 + 64, 48, k=1)
-        self.fuse_p3 = ConvBNAct(32, 32, k=1)
+        # P3 path - preserve fine-grained features (increased capacity)
+        self.p3_pre = DWConvCustom(c3, 96, kernel_size=3, padding=1)
+        self.p3_extra1 = DWConvCustom(96, 128, kernel_size=3, padding=1)
+        self.p3_extra2 = DWConvCustom(128, 128, kernel_size=3, padding=1)
+        self.p3_cbam = CBAM_ChannelOnly(128, reduction=4)
+        self.p3_refine = DWConvCustom(128, 128, kernel_size=3, padding=1)
+        
+        # P4 path - balanced feature processing with SPPF (more capacity)
+        self.p4_pre = DWConvCustom(c4, 160, kernel_size=3, padding=1)
+        self.p4_extra1 = DWConvCustom(160, 192, kernel_size=3, padding=1)
+        self.p4_extra2 = DWConvCustom(192, 192, kernel_size=3, padding=1)
+        self.p4_sppf = SimSPPF(192, 192)
+        self.p4_cbam = CBAM_ChannelOnly(192, reduction=4)
+        self.p4_refine = DWConvCustom(192, 192, kernel_size=3, padding=1)
+        
+        # P5 path - deep context with transformer (enhanced transformer)
+        self.p5_pre = DWConvCustom(c5, 256, kernel_size=3, padding=1)
+        self.p5_extra1 = DWConvCustom(256, 256, kernel_size=3, padding=1)
+        self.p5_extra2 = DWConvCustom(256, 256, kernel_size=3, padding=1)
+        self.p5_sppf = SimSPPF(256, 256)
+        self.p5_trans = P5Transformer(in_channels=256, embed_dim=128, ff_dim=256, num_layers=4)
+        self.p5_cbam = CBAM_ChannelOnly(128, reduction=4)
+        self.p5_refine = DWConvCustom(128, 256, kernel_size=3, padding=1)
+        
+        # Top-down feature fusion (FPN-style)
+        self.p5_to_p4 = ConvBNAct(256, 192, k=1)
+        self.p4_to_p3 = ConvBNAct(192, 128, k=1)
+        
+        # Bottom-up feature fusion (PAN-style)
+        self.p3_to_p4 = DWConvCustom(128, 192, kernel_size=3, stride=2, padding=1)
+        self.p4_to_p5 = DWConvCustom(192, 256, kernel_size=3, stride=2, padding=1)
+        
+        # Final output convolutions (more layers for refinement)
+        self.out_p3 = nn.Sequential(
+            DWConvCustom(128, 128, kernel_size=3, padding=1),
+            DWConvCustom(128, 128, kernel_size=3, padding=1),
+            DWConvCustom(128, 128, kernel_size=3, padding=1)
+        )
+        self.out_p4 = nn.Sequential(
+            DWConvCustom(192, 192, kernel_size=3, padding=1),
+            DWConvCustom(192, 192, kernel_size=3, padding=1),
+            DWConvCustom(192, 192, kernel_size=3, padding=1)
+        )
+        self.out_p5 = nn.Sequential(
+            DWConvCustom(256, 256, kernel_size=3, padding=1),
+            DWConvCustom(256, 256, kernel_size=3, padding=1),
+            DWConvCustom(256, 256, kernel_size=3, padding=1)
+        )
 
     def forward(self, feats):
-        """Forward pass through neck.
+        """Forward pass through enhanced neck with bidirectional fusion.
         
         Args:
             feats (list): Multi-scale features [P3, P4, P5]
             
         Returns:
-            list: Fused features [P3_out, P4_out, P5_out]
+            list: Enhanced and fused features [P3_out, P4_out, P5_out]
         """
         p3, p4, p5 = feats
 
-        # Apply channel attention
-        p3 = self.cbam3(p3)
-        p4 = self.cbam4(p4)
+        # Initial processing with extra layers
+        p3 = self.p3_pre(p3)
+        p3 = self.p3_extra1(p3)
+        p3 = self.p3_extra2(p3)
+        p3 = self.p3_cbam(p3)
+        
+        p4 = self.p4_pre(p4)
+        p4 = self.p4_extra1(p4)
+        p4 = self.p4_extra2(p4)
+        p4 = self.p4_sppf(p4)
+        p4 = self.p4_cbam(p4)
+        
+        p5 = self.p5_pre(p5)
+        p5 = self.p5_extra1(p5)
+        p5 = self.p5_extra2(p5)
+        p5 = self.p5_sppf(p5)
+        p5 = self.p5_trans(p5)
+        p5 = self.p5_cbam(p5)
+        p5 = self.p5_refine(p5)
+        
+        # Top-down fusion (coarse to fine)
+        p5_up = nn.functional.interpolate(self.p5_to_p4(p5), size=p4.shape[-2:], mode='nearest')
+        p4 = p4 + p5_up
+        p4 = self.p4_refine(p4)
+        
+        p4_up = nn.functional.interpolate(self.p4_to_p3(p4), size=p3.shape[-2:], mode='nearest')
+        p3 = p3 + p4_up
+        p3 = self.p3_refine(p3)
+        
+        # Bottom-up fusion (fine to coarse) - PAN
+        p3_down = self.p3_to_p4(p3)
+        p4 = p4 + p3_down
+        
+        p4_down = self.p4_to_p5(p4)
+        p5 = p5 + p4_down
+        
+        # Final refinement
+        p3_out = self.out_p3(p3)
+        p4_out = self.out_p4(p4)
+        p5_out = self.out_p5(p5)
 
-        # P5 pipeline
-        p5 = self.sppf(p5)
-        p5 = self.trans_p5(p5)
-        p5 = self.cbam5(p5)
-
-        # Unify channels
-        p3_u = self.out3(p3)
-        p4_u = self.out4(p4)
-        p5_u = self.out5(p5)
-
-        # Fusion with pooling
-        p5_pool_to_p4 = nn.functional.adaptive_avg_pool2d(p5_u, p4_u.shape[-2:])
-        p4_u = self.fuse_p4(torch.cat([p4_u, p5_pool_to_p4], dim=1))
-        p3_u = self.fuse_p3(p3_u)
-
-        return [p3_u, p4_u, p5_u]
+        return [p3_out, p4_out, p5_out]

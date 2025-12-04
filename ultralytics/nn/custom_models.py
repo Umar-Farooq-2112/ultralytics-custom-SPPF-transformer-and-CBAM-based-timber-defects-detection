@@ -41,10 +41,10 @@ class MobileNetV3YOLO(nn.Module):
         
         # Initialize backbone and neck
         self.backbone = MobileNetV3BackboneDW(pretrained=pretrained)
-        self.neck = UltraLiteNeckDW(in_channels=[24, 40, 160])
+        self.neck = UltraLiteNeckDW(in_channels=self.backbone.out_channels)
         
-        # Neck output channels: [32, 48, 64] for [P3, P4, P5]
-        neck_out_channels = [32, 48, 64]
+        # Neck output channels: [128, 192, 256] for [P3, P4, P5] - enhanced for 4-5M params
+        neck_out_channels = [128, 192, 256]
         
         # Initialize detection head
         # YOLOv8n-style head with our custom neck outputs
