@@ -4,7 +4,7 @@
 import torch
 import torch.nn as nn
 
-from ultralytics.nn.modules import CSPResNetBackbone, YOLONeckP2Enhanced, Detect, Conv
+from ultralytics.nn.modules import CSPResNetBackbone, YOLONeckP2Enhanced, YOLONeckP2EnhancedV2, Detect, Conv
 from ultralytics.nn.tasks import DetectionModel
 from ultralytics.utils import LOGGER
 
@@ -263,3 +263,158 @@ class MobileNetV3YOLO(nn.Module):
             self.load_state_dict(state_dict, strict=False)
         else:
             self.load_state_dict(weights, strict=False)
+
+
+class MobileNetV3YOLOV2(nn.Module):
+    """
+    Priority 2: Enhanced YOLO with Deformable Convolutions and Coordinate Attention.
+    
+    Improvements over V1:
+    - Deformable convolutions in neck PAN pathway (adapts to irregular defect shapes)
+    - Coordinate Attention in P4/P5 (position-aware feature refinement)
+    - Better for: curved cracks, odd-shaped knots, spatially-varying defects
+    
+    Expected performance gain: +1.5% mAP over Priority 1
+    - Deformable convs: +1.0% mAP
+    - Coordinate attention: +0.5% mAP
+    
+    Architecture:
+    - Backbone: CSPResNet with ECA attention (same as V1)
+    - Neck: YOLONeckP2EnhancedV2 (deformable convs + CAM)
+    - Head: EnhancedDetectHead (same as V1)
+    - Detection scales: P2, P3, P4, P5
+    """
+    
+    def __init__(self, nc=80, pretrained=True, verbose=True):
+        """Initialize Priority 2 model.
+        
+        Args:
+            nc (int): Number of classes
+            pretrained (bool): Use pretrained backbone (not used for CSPResNet)
+            verbose (bool): Print model information
+        """
+        super().__init__()
+        self.nc = nc
+        self.task = 'detect'
+        self.names = {i: f"{i}" for i in range(nc)}
+        
+        # Backbone - same as Priority 1
+        self.backbone = CSPResNetBackbone(pretrained=pretrained)
+        
+        # Neck - Priority 2: Enhanced with deformable convs and coordinate attention
+        self.neck = YOLONeckP2EnhancedV2(in_channels=self.backbone.out_channels)
+        
+        # Neck output channels: [64, 96, 128, 160] for [P2, P3, P4, P5]
+        neck_out_channels = self.neck.out_channels
+        
+        # Head - same as Priority 1
+        self.head = EnhancedDetectHead(nc=nc, ch=tuple(neck_out_channels))
+        
+        # Model list for v8DetectionLoss compatibility
+        self.model = nn.ModuleList([self.backbone, self.neck, self.head.detect])
+        
+        # Store args for loss function
+        self.args = None
+        
+        # Model metadata
+        self.stride = torch.tensor([4, 8, 16, 32])  # P2, P3, P4, P5 strides
+        self.yaml = {'nc': nc, 'custom_model': 'cspresnet-yolo-p2-v2'}
+        self.args = {}
+        self.pt_path = None
+        
+        # Initialize head
+        self._initialize_head()
+        
+        if verbose:
+            self.info()
+    
+    def _initialize_head(self):
+        """Initialize detection head with proper strides."""
+        m = self.head.detect
+        if isinstance(m, Detect):
+            s = 640
+            m.inplace = True
+            
+            forward = lambda x: self.forward(x)
+            m.stride = torch.tensor([s / x.shape[-2] for x in forward(torch.zeros(1, 3, s, s))])
+            self.stride = m.stride
+            m.bias_init()
+    
+    def forward(self, x, *args, **kwargs):
+        """Forward pass."""
+        if isinstance(x, dict):
+            return self.loss(x, *args, **kwargs)
+        
+        # Backbone
+        feats = self.backbone(x)  # [P2, P3, P4, P5]: [64, 128, 256, 384]
+        
+        # Neck - V2 with deformable convs and coordinate attention
+        fused_feats = self.neck(feats)  # [P2, P3, P4, P5]: [64, 96, 128, 160]
+        
+        # Head
+        outputs = self.head(fused_feats)
+        
+        return outputs
+    
+    def loss(self, batch, preds=None):
+        """Compute loss."""
+        if not hasattr(self, 'criterion') or self.criterion is None:
+            self.criterion = self.init_criterion()
+        
+        if preds is None:
+            preds = self.forward(batch["img"])
+        return self.criterion(preds, batch)
+    
+    def init_criterion(self):
+        """Initialize loss criterion."""
+        from ultralytics.utils.loss import v8DetectionLoss
+        return v8DetectionLoss(self)
+    
+    def fuse(self, verbose=True):
+        """Fuse Conv2d + BatchNorm2d layers."""
+        if not self.is_fused():
+            for m in self.modules():
+                if isinstance(m, (nn.Conv2d, nn.BatchNorm2d)) and hasattr(m, 'bn'):
+                    from ultralytics.utils.torch_utils import fuse_conv_and_bn
+                    m.conv = fuse_conv_and_bn(m.conv, m.bn)
+                    delattr(m, 'bn')
+                    m.forward = m.forward_fuse
+            if verbose:
+                self.info()
+        return self
+    
+    def is_fused(self, thresh=10):
+        """Check if model is fused."""
+        bn = tuple(v for k, v in nn.__dict__.items() if 'Norm' in k)
+        return sum(isinstance(v, bn) for v in self.modules()) < thresh
+    
+    def info(self, detailed=False, verbose=True, imgsz=640):
+        """Print model information."""
+        from ultralytics.utils.torch_utils import model_info
+        return model_info(self, detailed=detailed, verbose=verbose, imgsz=imgsz)
+    
+    def predict(self, x, profile=False, visualize=False, augment=False):
+        """Perform inference."""
+        if augment:
+            y = []
+            for xi in [x, torch.flip(x, [-1])]:
+                yi = self.forward(xi)
+                y.append(yi)
+            return torch.cat(y, -1)
+        return self.forward(x)
+    
+    def load(self, weights):
+        """Load weights."""
+        if isinstance(weights, str):
+            import torch
+            ckpt = torch.load(weights, map_location='cpu')
+            if isinstance(ckpt, dict):
+                state_dict = ckpt.get('model', ckpt)
+                if hasattr(state_dict, 'state_dict'):
+                    state_dict = state_dict.state_dict()
+            else:
+                state_dict = ckpt
+            self.load_state_dict(state_dict, strict=False)
+        else:
+            self.load_state_dict(weights, strict=False)
+

@@ -103,8 +103,11 @@ from .transformer import (
 )
 from .custom_mobilenet_blocks import (
     ECAAttention,
+    CoordinateAttention,
+    DeformableConv2d,
     CSPResNetBackbone,
     YOLONeckP2Enhanced,
+    YOLONeckP2EnhancedV2,
 )
 
 __all__ = (
@@ -115,13 +118,16 @@ __all__ = (
     "C3",
     "C3TR",
     "CBAM",
+    "CoordinateAttention",
     "CSPResNetBackbone",
     "CIB",
+    "DeformableConv2d",
     "DFL",
     "ECAAttention",
     "ELAN1",
     "MLP",
     "YOLONeckP2Enhanced",
+    "YOLONeckP2EnhancedV2",
     "OBB",
     "PSA",
     "SPP",
