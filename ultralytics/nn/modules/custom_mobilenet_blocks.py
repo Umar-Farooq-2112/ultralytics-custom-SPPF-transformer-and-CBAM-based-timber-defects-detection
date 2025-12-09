@@ -10,6 +10,7 @@ __all__ = (
     "ConvBNAct",
     "CBAM_ChannelOnly",
     "P5Transformer",
+    "SimSPPF",
     "MobileNetV3BackboneDW",
     "UltraLiteNeckDW",
 )
@@ -131,6 +132,32 @@ class CBAM_ChannelOnly(nn.Module):
         return x
 
 
+class SimSPPF(nn.Module):
+    """Simplified SPPF with single kernel size for efficient multi-scale pooling."""
+    
+    def __init__(self, in_channels, out_channels, k=5):
+        """Initialize SimSPPF.
+        
+        Args:
+            in_channels (int): Input channels
+            out_channels (int): Output channels
+            k (int): Kernel size for max pooling
+        """
+        super().__init__()
+        hidden = in_channels // 2
+        self.cv1 = ConvBNAct(in_channels, hidden, k=1)
+        self.cv2 = ConvBNAct(hidden * 4, out_channels, k=1)
+        self.m = nn.MaxPool2d(kernel_size=k, stride=1, padding=k // 2)
+    
+    def forward(self, x):
+        """Forward pass through SPPF."""
+        x = self.cv1(x)
+        y1 = self.m(x)
+        y2 = self.m(y1)
+        y3 = self.m(y2)
+        return self.cv2(torch.cat([x, y1, y2, y3], 1))
+
+
 class P5Transformer(nn.Module):
     """Small transformer for P5 features."""
     
@@ -189,29 +216,31 @@ class MobileNetV3BackboneDW(nn.Module):
         self.stage2 = feats[3:7]
         self.stage3 = feats[7:]
 
-        # Enhanced P3 processing - critical for small defects (increased capacity)
+        # Enhanced P3 processing - critical for small defects with residual connections
         self.conv_p3_1 = DWConvCustom(24, 64, kernel_size=3, stride=1, padding=1)
-        self.conv_p3_2 = DWConvCustom(64, 96, kernel_size=3, stride=1, padding=1)
-        self.conv_p3_3 = DWConvCustom(96, 96, kernel_size=3, stride=1, padding=1)
+        self.conv_p3_2 = DWConvCustom(64, 80, kernel_size=3, stride=1, padding=1)
+        self.conv_p3_3 = DWConvCustom(80, 96, kernel_size=3, stride=1, padding=1)
         self.conv_p3_4 = DWConvCustom(96, 96, kernel_size=3, stride=1, padding=1)
+        self.p3_residual = nn.Conv2d(24, 96, 1, bias=False)  # Residual projection
         self.cbam_p3 = CBAM_ChannelOnly(96, reduction=4)
         
-        # Enhanced P4 processing - balanced features (increased capacity)
-        self.conv_p4_1 = DWConvCustom(40, 96, kernel_size=3, stride=1, padding=1)
-        self.conv_p4_2 = DWConvCustom(96, 160, kernel_size=3, stride=1, padding=1)
-        self.conv_p4_3 = DWConvCustom(160, 160, kernel_size=3, stride=1, padding=1)
+        # Enhanced P4 processing - balanced features with residual
+        self.conv_p4_1 = DWConvCustom(40, 80, kernel_size=3, stride=1, padding=1)
+        self.conv_p4_2 = DWConvCustom(80, 128, kernel_size=3, stride=1, padding=1)
+        self.conv_p4_3 = DWConvCustom(128, 160, kernel_size=3, stride=1, padding=1)
         self.conv_p4_4 = DWConvCustom(160, 160, kernel_size=3, stride=1, padding=1)
+        self.p4_residual = nn.Conv2d(40, 160, 1, bias=False)  # Residual projection
         self.cbam_p4 = CBAM_ChannelOnly(160, reduction=4)
         
-        # Enhanced P5 processing - context and large defects (increased capacity)
+        # Enhanced P5 processing - deep context for large defects
         self.conv_p5_1 = DWConvCustom(576, 256, kernel_size=3, stride=1, padding=1)
-        self.conv_p5_2 = DWConvCustom(256, 320, kernel_size=3, stride=1, padding=1)
-        self.conv_p5_3 = DWConvCustom(320, 320, kernel_size=3, stride=1, padding=1)
+        self.conv_p5_2 = DWConvCustom(256, 288, kernel_size=3, stride=1, padding=1)
+        self.conv_p5_3 = DWConvCustom(288, 320, kernel_size=3, stride=1, padding=1)
         self.conv_p5_4 = DWConvCustom(320, 320, kernel_size=3, stride=1, padding=1)
-        self.conv_p5_5 = DWConvCustom(320, 320, kernel_size=3, stride=1, padding=1)
+        self.p5_residual = nn.Conv2d(576, 320, 1, bias=False)  # Residual projection
         self.cbam_p5 = CBAM_ChannelOnly(320, reduction=4)
 
-        # Output channels for each stage (increased for higher capacity)
+        # Output channels for each stage
         self.out_channels = [96, 160, 320]
 
     def forward(self, x):
@@ -228,27 +257,29 @@ class MobileNetV3BackboneDW(nn.Module):
         p4_base = self.stage2(p3_base)  # 40 channels  
         p5_base = self.stage3(p4_base)  # 576 channels
         
-        # Then enhance each level independently with increased capacity
-        # P3 path - preserve fine details for small defects (4 conv layers)
+        # Then enhance each level with residual connections for better gradient flow
+        # P3 path - preserve fine details for small defects (with residual)
         p3 = self.conv_p3_1(p3_base)
         p3 = self.conv_p3_2(p3)
         p3 = self.conv_p3_3(p3)
         p3 = self.conv_p3_4(p3)
+        p3 = p3 + self.p3_residual(p3_base)  # Add residual connection
         p3 = self.cbam_p3(p3)
         
-        # P4 path - balanced feature extraction (4 conv layers)
+        # P4 path - balanced feature extraction (with residual)
         p4 = self.conv_p4_1(p4_base)
         p4 = self.conv_p4_2(p4)
         p4 = self.conv_p4_3(p4)
         p4 = self.conv_p4_4(p4)
+        p4 = p4 + self.p4_residual(p4_base)  # Add residual connection
         p4 = self.cbam_p4(p4)
         
-        # P5 path - deep context for large defects (5 conv layers)
+        # P5 path - deep context for large defects (with residual)
         p5 = self.conv_p5_1(p5_base)
         p5 = self.conv_p5_2(p5)
         p5 = self.conv_p5_3(p5)
         p5 = self.conv_p5_4(p5)
-        p5 = self.conv_p5_5(p5)
+        p5 = p5 + self.p5_residual(p5_base)  # Add residual connection
         p5 = self.cbam_p5(p5)
         
         return [p3, p4, p5]
@@ -266,22 +297,23 @@ class UltraLiteNeckDW(nn.Module):
         super().__init__()
         c3, c4, c5 = in_channels
 
-        # P3 path - preserve fine-grained features (increased capacity)
+        # P3 path - preserve fine-grained features for small defects
         self.p3_pre = DWConvCustom(c3, 128, kernel_size=3, padding=1)
         self.p3_extra1 = DWConvCustom(128, 160, kernel_size=3, padding=1)
         self.p3_cbam = CBAM_ChannelOnly(160, reduction=8)
         self.p3_refine = DWConvCustom(160, 160, kernel_size=3, padding=1)
         
-        # P4 path - balanced feature processing (increased capacity)
+        # P4 path - balanced processing with SPPF for multi-scale defects
         self.p4_pre = DWConvCustom(c4, 192, kernel_size=3, padding=1)
+        self.p4_sppf = SimSPPF(192, 192, k=5)  # Multi-scale pooling
         self.p4_extra1 = DWConvCustom(192, 224, kernel_size=3, padding=1)
         self.p4_cbam = CBAM_ChannelOnly(224, reduction=8)
         self.p4_refine = DWConvCustom(224, 224, kernel_size=3, padding=1)
         
-        # P5 path - deep context with enhanced transformer (increased capacity)
+        # P5 path - deep context with SPPF + enhanced 3-layer transformer
         self.p5_pre = DWConvCustom(c5, 256, kernel_size=3, padding=1)
-        self.p5_extra1 = DWConvCustom(256, 256, kernel_size=3, padding=1)
-        self.p5_trans = P5Transformer(in_channels=256, embed_dim=128, ff_dim=256, num_layers=2)
+        self.p5_sppf = SimSPPF(256, 256, k=5)  # Multi-scale pooling
+        self.p5_trans = P5Transformer(in_channels=256, embed_dim=128, ff_dim=256, num_layers=3)
         self.p5_cbam = CBAM_ChannelOnly(128, reduction=8)
         self.p5_refine = DWConvCustom(128, 256, kernel_size=3, padding=1)
         
@@ -293,7 +325,7 @@ class UltraLiteNeckDW(nn.Module):
         self.p3_to_p4 = DWConvCustom(160, 224, kernel_size=3, stride=2, padding=1)
         self.p4_to_p5 = DWConvCustom(224, 256, kernel_size=3, stride=2, padding=1)
         
-        # Final output convolutions (single layer per scale)
+        # Final output convolutions
         self.out_p3 = DWConvCustom(160, 160, kernel_size=3, padding=1)
         self.out_p4 = DWConvCustom(224, 224, kernel_size=3, padding=1)
         self.out_p5 = DWConvCustom(256, 256, kernel_size=3, padding=1)
@@ -309,18 +341,19 @@ class UltraLiteNeckDW(nn.Module):
         """
         p3, p4, p5 = feats
 
-        # Initial processing (optimized - no SPPF)
+        # Initial processing with SPPF for multi-scale feature extraction
         p3 = self.p3_pre(p3)
         p3 = self.p3_extra1(p3)
         p3 = self.p3_cbam(p3)
         
         p4 = self.p4_pre(p4)
+        p4 = self.p4_sppf(p4)  # Multi-scale pooling
         p4 = self.p4_extra1(p4)
         p4 = self.p4_cbam(p4)
         
         p5 = self.p5_pre(p5)
-        p5 = self.p5_extra1(p5)
-        p5 = self.p5_trans(p5)
+        p5 = self.p5_sppf(p5)  # Multi-scale pooling
+        p5 = self.p5_trans(p5)  # 3-layer transformer
         p5 = self.p5_cbam(p5)
         p5 = self.p5_refine(p5)
         
