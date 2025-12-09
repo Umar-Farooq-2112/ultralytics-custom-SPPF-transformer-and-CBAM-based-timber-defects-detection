@@ -9,7 +9,6 @@ __all__ = (
     "DWConvCustom",
     "ConvBNAct",
     "CBAM_ChannelOnly",
-    "SimSPPF",
     "P5Transformer",
     "MobileNetV3BackboneDW",
     "UltraLiteNeckDW",
@@ -132,31 +131,6 @@ class CBAM_ChannelOnly(nn.Module):
         return x
 
 
-class SimSPPF(nn.Module):
-    """Simplified SPPF (Spatial Pyramid Pooling - Fast)."""
-    
-    def __init__(self, c1, c2, k=5):
-        """Initialize simplified SPPF module.
-        
-        Args:
-            c1 (int): Input channels
-            c2 (int): Output channels
-            k (int): Kernel size for pooling
-        """
-        super().__init__()
-        self.conv1 = ConvBNAct(c1, c2, k=1)
-        self.pool = nn.MaxPool2d(k, 1, k // 2)
-        self.conv2 = ConvBNAct(c2 * 4, c2, k=1)
-    
-    def forward(self, x):
-        """Forward pass through SPPF."""
-        x = self.conv1(x)
-        y1 = self.pool(x)
-        y2 = self.pool(y1)
-        y3 = self.pool(y2)
-        return self.conv2(torch.cat([x, y1, y2, y3], dim=1))
-
-
 class P5Transformer(nn.Module):
     """Small transformer for P5 features."""
     
@@ -215,29 +189,23 @@ class MobileNetV3BackboneDW(nn.Module):
         self.stage2 = feats[3:7]
         self.stage3 = feats[7:]
 
-        # Enhanced P3 processing - critical for small defects (deeper stack with residuals)
+        # Enhanced P3 processing - critical for small defects (reduced layers)
         self.conv_p3_1 = DWConvCustom(24, 48, kernel_size=3, stride=1, padding=1)
         self.conv_p3_2 = DWConvCustom(48, 64, kernel_size=3, stride=1, padding=1)
         self.conv_p3_3 = DWConvCustom(64, 64, kernel_size=3, stride=1, padding=1)
-        self.conv_p3_4 = DWConvCustom(64, 64, kernel_size=3, stride=1, padding=1)
-        self.conv_p3_5 = DWConvCustom(64, 64, kernel_size=3, stride=1, padding=1)
         self.cbam_p3 = CBAM_ChannelOnly(64, reduction=4)
         
-        # Enhanced P4 processing - balanced features (more capacity with residuals)
+        # Enhanced P4 processing - balanced features (reduced layers)
         self.conv_p4_1 = DWConvCustom(40, 80, kernel_size=3, stride=1, padding=1)
         self.conv_p4_2 = DWConvCustom(80, 128, kernel_size=3, stride=1, padding=1)
         self.conv_p4_3 = DWConvCustom(128, 128, kernel_size=3, stride=1, padding=1)
-        self.conv_p4_4 = DWConvCustom(128, 128, kernel_size=3, stride=1, padding=1)
-        self.conv_p4_5 = DWConvCustom(128, 128, kernel_size=3, stride=1, padding=1)
         self.cbam_p4 = CBAM_ChannelOnly(128, reduction=4)
         
-        # Enhanced P5 processing - context and large defects (deepest with residuals)
+        # Enhanced P5 processing - context and large defects (reduced layers)
         self.conv_p5_1 = DWConvCustom(576, 192, kernel_size=3, stride=1, padding=1)
         self.conv_p5_2 = DWConvCustom(192, 256, kernel_size=3, stride=1, padding=1)
         self.conv_p5_3 = DWConvCustom(256, 256, kernel_size=3, stride=1, padding=1)
         self.conv_p5_4 = DWConvCustom(256, 256, kernel_size=3, stride=1, padding=1)
-        self.conv_p5_5 = DWConvCustom(256, 256, kernel_size=3, stride=1, padding=1)
-        self.conv_p5_6 = DWConvCustom(256, 256, kernel_size=3, stride=1, padding=1)
         self.cbam_p5 = CBAM_ChannelOnly(256, reduction=4)
 
         # Output channels for each stage (significantly increased)
@@ -257,36 +225,24 @@ class MobileNetV3BackboneDW(nn.Module):
         p4_base = self.stage2(p3_base)  # 40 channels  
         p5_base = self.stage3(p4_base)  # 576 channels
         
-        # Then enhance each level independently with deeper processing and residuals
-        # P3 path - preserve fine details for small defects (5 conv layers + residual)
+        # Then enhance each level independently (reduced from 5-6 layers to 3-4 layers)
+        # P3 path - preserve fine details for small defects (3 conv layers, no residual)
         p3 = self.conv_p3_1(p3_base)
         p3 = self.conv_p3_2(p3)
-        p3_res = p3  # Save for residual
         p3 = self.conv_p3_3(p3)
-        p3 = self.conv_p3_4(p3)
-        p3 = p3 + p3_res  # Residual connection
-        p3 = self.conv_p3_5(p3)
         p3 = self.cbam_p3(p3)
         
-        # P4 path - balanced feature extraction (5 conv layers + residual)
+        # P4 path - balanced feature extraction (3 conv layers, no residual)
         p4 = self.conv_p4_1(p4_base)
         p4 = self.conv_p4_2(p4)
-        p4_res = p4  # Save for residual
         p4 = self.conv_p4_3(p4)
-        p4 = self.conv_p4_4(p4)
-        p4 = p4 + p4_res  # Residual connection
-        p4 = self.conv_p4_5(p4)
         p4 = self.cbam_p4(p4)
         
-        # P5 path - deep context for large defects (6 conv layers + residual)
+        # P5 path - deep context for large defects (4 conv layers, no residual)
         p5 = self.conv_p5_1(p5_base)
         p5 = self.conv_p5_2(p5)
-        p5_res = p5  # Save for residual
         p5 = self.conv_p5_3(p5)
         p5 = self.conv_p5_4(p5)
-        p5 = p5 + p5_res  # Residual connection
-        p5 = self.conv_p5_5(p5)
-        p5 = self.conv_p5_6(p5)
         p5 = self.cbam_p5(p5)
         
         return [p3, p4, p5]
@@ -304,54 +260,37 @@ class UltraLiteNeckDW(nn.Module):
         super().__init__()
         c3, c4, c5 = in_channels
 
-        # P3 path - preserve fine-grained features (increased capacity)
+        # P3 path - preserve fine-grained features (reduced capacity)
         self.p3_pre = DWConvCustom(c3, 96, kernel_size=3, padding=1)
         self.p3_extra1 = DWConvCustom(96, 128, kernel_size=3, padding=1)
-        self.p3_extra2 = DWConvCustom(128, 128, kernel_size=3, padding=1)
-        self.p3_cbam = CBAM_ChannelOnly(128, reduction=4)
+        self.p3_cbam = CBAM_ChannelOnly(128, reduction=8)
         self.p3_refine = DWConvCustom(128, 128, kernel_size=3, padding=1)
         
-        # P4 path - balanced feature processing with SPPF (more capacity)
+        # P4 path - balanced feature processing (removed SPPF, reduced capacity)
         self.p4_pre = DWConvCustom(c4, 160, kernel_size=3, padding=1)
         self.p4_extra1 = DWConvCustom(160, 192, kernel_size=3, padding=1)
-        self.p4_extra2 = DWConvCustom(192, 192, kernel_size=3, padding=1)
-        self.p4_sppf = SimSPPF(192, 192)
-        self.p4_cbam = CBAM_ChannelOnly(192, reduction=4)
+        self.p4_cbam = CBAM_ChannelOnly(192, reduction=8)
         self.p4_refine = DWConvCustom(192, 192, kernel_size=3, padding=1)
         
-        # P5 path - deep context with transformer (enhanced transformer)
-        self.p5_pre = DWConvCustom(c5, 256, kernel_size=3, padding=1)
-        self.p5_extra1 = DWConvCustom(256, 256, kernel_size=3, padding=1)
-        self.p5_extra2 = DWConvCustom(256, 256, kernel_size=3, padding=1)
-        self.p5_sppf = SimSPPF(256, 256)
-        self.p5_trans = P5Transformer(in_channels=256, embed_dim=128, ff_dim=256, num_layers=4)
-        self.p5_cbam = CBAM_ChannelOnly(128, reduction=4)
-        self.p5_refine = DWConvCustom(128, 256, kernel_size=3, padding=1)
+        # P5 path - deep context with transformer (removed SPPF, reduced transformer and channels)
+        self.p5_pre = DWConvCustom(c5, 192, kernel_size=3, padding=1)
+        self.p5_extra1 = DWConvCustom(192, 192, kernel_size=3, padding=1)
+        self.p5_trans = P5Transformer(in_channels=192, embed_dim=96, ff_dim=192, num_layers=1)
+        self.p5_cbam = CBAM_ChannelOnly(96, reduction=8)
+        self.p5_refine = DWConvCustom(96, 192, kernel_size=3, padding=1)
         
         # Top-down feature fusion (FPN-style)
-        self.p5_to_p4 = ConvBNAct(256, 192, k=1)
+        self.p5_to_p4 = ConvBNAct(192, 192, k=1)
         self.p4_to_p3 = ConvBNAct(192, 128, k=1)
         
         # Bottom-up feature fusion (PAN-style)
         self.p3_to_p4 = DWConvCustom(128, 192, kernel_size=3, stride=2, padding=1)
-        self.p4_to_p5 = DWConvCustom(192, 256, kernel_size=3, stride=2, padding=1)
+        self.p4_to_p5 = DWConvCustom(192, 192, kernel_size=3, stride=2, padding=1)
         
-        # Final output convolutions (more layers for refinement)
-        self.out_p3 = nn.Sequential(
-            DWConvCustom(128, 128, kernel_size=3, padding=1),
-            DWConvCustom(128, 128, kernel_size=3, padding=1),
-            DWConvCustom(128, 128, kernel_size=3, padding=1)
-        )
-        self.out_p4 = nn.Sequential(
-            DWConvCustom(192, 192, kernel_size=3, padding=1),
-            DWConvCustom(192, 192, kernel_size=3, padding=1),
-            DWConvCustom(192, 192, kernel_size=3, padding=1)
-        )
-        self.out_p5 = nn.Sequential(
-            DWConvCustom(256, 256, kernel_size=3, padding=1),
-            DWConvCustom(256, 256, kernel_size=3, padding=1),
-            DWConvCustom(256, 256, kernel_size=3, padding=1)
-        )
+        # Final output convolutions (single layer per scale for efficiency)
+        self.out_p3 = DWConvCustom(128, 128, kernel_size=3, padding=1)
+        self.out_p4 = DWConvCustom(192, 192, kernel_size=3, padding=1)
+        self.out_p5 = DWConvCustom(192, 192, kernel_size=3, padding=1)
 
     def forward(self, feats):
         """Forward pass through enhanced neck with bidirectional fusion.
@@ -364,22 +303,17 @@ class UltraLiteNeckDW(nn.Module):
         """
         p3, p4, p5 = feats
 
-        # Initial processing with extra layers
+        # Initial processing (optimized - no SPPF)
         p3 = self.p3_pre(p3)
         p3 = self.p3_extra1(p3)
-        p3 = self.p3_extra2(p3)
         p3 = self.p3_cbam(p3)
         
         p4 = self.p4_pre(p4)
         p4 = self.p4_extra1(p4)
-        p4 = self.p4_extra2(p4)
-        p4 = self.p4_sppf(p4)
         p4 = self.p4_cbam(p4)
         
         p5 = self.p5_pre(p5)
         p5 = self.p5_extra1(p5)
-        p5 = self.p5_extra2(p5)
-        p5 = self.p5_sppf(p5)
         p5 = self.p5_trans(p5)
         p5 = self.p5_cbam(p5)
         p5 = self.p5_refine(p5)

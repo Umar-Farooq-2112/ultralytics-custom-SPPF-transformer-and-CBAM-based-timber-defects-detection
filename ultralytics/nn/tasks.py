@@ -68,7 +68,7 @@ from ultralytics.nn.modules import (
     RTDETRDecoder,
     SCDown,
     Segment,
-    SimSPPF,
+    # SimSPPF,
     TorchVision,
     UltraLiteNeckDW,
     WorldDetect,

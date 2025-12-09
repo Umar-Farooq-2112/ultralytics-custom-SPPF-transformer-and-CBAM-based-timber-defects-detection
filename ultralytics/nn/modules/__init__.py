@@ -105,7 +105,7 @@ from .custom_mobilenet_blocks import (
     DWConvCustom,
     ConvBNAct,
     CBAM_ChannelOnly,
-    SimSPPF,
+    # SimSPPF,
     P5Transformer,
     MobileNetV3BackboneDW,
     UltraLiteNeckDW,
